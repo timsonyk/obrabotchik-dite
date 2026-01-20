@@ -40,7 +40,7 @@ DEFAULT_VARIANTS_COUNT = 5
 GEMINI_MODEL = "gemini-3-pro-image-preview"
 
 # Настройки изображения (точно как в obrabor.py)
-IMAGE_ASPECT_RATIO = "1:1"
+IMAGE_ASPECT_RATIO = "3:4"
 IMAGE_SIZE = "4K"
 
 # Максимальное количество параллельных запросов (больше = быстрее)

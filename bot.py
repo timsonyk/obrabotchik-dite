@@ -171,7 +171,7 @@ def get_user_settings(user_id: int) -> dict:
                 'variants_count': 5,  # По умолчанию 5 вариантов
                 'use_custom_prompt': False,  # Использовать кастомный промпт
                 'custom_prompt': None,  # Кастомный промпт
-                'aspect_ratio': '1:1',  # Соотношение сторон
+                'aspect_ratio': '3:4',  # Соотношение сторон
                 'selected_prompt_id': DEFAULT_PROMPT_ID  # Выбранный промпт
             }
     return user_settings[user_id]
