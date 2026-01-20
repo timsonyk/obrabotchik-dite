@@ -13,7 +13,8 @@ register_heif_opener()
 
 from config import (
     GOOGLE_API_KEY,
-    PROCESSING_PROMPT,
+    PROMPTS,
+    DEFAULT_PROMPT_ID,
     GEMINI_MODEL,
     IMAGE_ASPECT_RATIO,
     IMAGE_SIZE,
@@ -43,8 +44,8 @@ def generate_variant(image_part: types.Part, idx: int, prompt: str = None, aspec
         bytes: Байты обработанного изображения или None в случае ошибки
     """
     try:
-        # Используем кастомный промпт или стандартный
-        used_prompt = prompt if prompt is not None else PROCESSING_PROMPT
+        # Используем переданный промпт или стандартный из конфига
+        used_prompt = prompt if prompt is not None else PROMPTS[DEFAULT_PROMPT_ID]['text']
 
         # Используем точно такой же вызов, как в obrabor.py
         response = client.models.generate_content(

@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 import asyncio
 
 from image_processor import process_image_stream
+from config import PROMPTS, DEFAULT_PROMPT_ID
 from PIL import Image
 from io import BytesIO
 
@@ -57,14 +58,17 @@ def init_db():
             use_custom_prompt INTEGER DEFAULT 0,
             custom_prompt TEXT,
             aspect_ratio TEXT DEFAULT '1:1',
+            selected_prompt_id TEXT DEFAULT 'shorten',
             FOREIGN KEY (user_id) REFERENCES users(user_id)
         )
     ''')
-    # Миграция: добавляем колонку aspect_ratio если её нет
+    # Миграция: добавляем колонки если их нет
     cursor.execute("PRAGMA table_info(user_settings)")
     columns = [col[1] for col in cursor.fetchall()]
     if 'aspect_ratio' not in columns:
         cursor.execute("ALTER TABLE user_settings ADD COLUMN aspect_ratio TEXT DEFAULT '1:1'")
+    if 'selected_prompt_id' not in columns:
+        cursor.execute("ALTER TABLE user_settings ADD COLUMN selected_prompt_id TEXT DEFAULT 'shorten'")
     conn.commit()
     conn.close()
     logger.info(f"База данных инициализирована: {DB_PATH}")
@@ -104,7 +108,7 @@ def load_user_settings_from_db(user_id: int) -> dict:
     """Загрузить настройки пользователя из БД"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT variants_count, use_custom_prompt, custom_prompt, aspect_ratio FROM user_settings WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT variants_count, use_custom_prompt, custom_prompt, aspect_ratio, selected_prompt_id FROM user_settings WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     conn.close()
 
@@ -113,7 +117,8 @@ def load_user_settings_from_db(user_id: int) -> dict:
             'variants_count': row[0],
             'use_custom_prompt': bool(row[1]),
             'custom_prompt': row[2],
-            'aspect_ratio': row[3] or '1:1'
+            'aspect_ratio': row[3] or '1:1',
+            'selected_prompt_id': row[4] or DEFAULT_PROMPT_ID
         }
     return None
 
@@ -122,9 +127,9 @@ def save_user_settings_to_db(user_id: int, settings: dict):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT OR REPLACE INTO user_settings (user_id, variants_count, use_custom_prompt, custom_prompt, aspect_ratio)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (user_id, settings['variants_count'], int(settings['use_custom_prompt']), settings['custom_prompt'], settings.get('aspect_ratio', '1:1')))
+        INSERT OR REPLACE INTO user_settings (user_id, variants_count, use_custom_prompt, custom_prompt, aspect_ratio, selected_prompt_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (user_id, settings['variants_count'], int(settings['use_custom_prompt']), settings['custom_prompt'], settings.get('aspect_ratio', '1:1'), settings.get('selected_prompt_id', DEFAULT_PROMPT_ID)))
     conn.commit()
     conn.close()
 
@@ -151,7 +156,8 @@ authorized_users, blocked_users = load_users_from_db()
 
 # Очередь обработки (только 1 обработка одновременно)
 processing_semaphore = asyncio.Semaphore(1)
-queue_count = 0  # Счетчик ожидающих в очереди
+queue_list = []  # Список ожидающих в очереди (user_id, message_obj)
+queue_lock = asyncio.Lock()  # Лок для безопасного доступа к очереди
 
 def get_user_settings(user_id: int) -> dict:
     """Получить настройки пользователя"""
@@ -165,7 +171,8 @@ def get_user_settings(user_id: int) -> dict:
                 'variants_count': 5,  # По умолчанию 5 вариантов
                 'use_custom_prompt': False,  # Использовать кастомный промпт
                 'custom_prompt': None,  # Кастомный промпт
-                'aspect_ratio': '1:1'  # Соотношение сторон
+                'aspect_ratio': '1:1',  # Соотношение сторон
+                'selected_prompt_id': DEFAULT_PROMPT_ID  # Выбранный промпт
             }
     return user_settings[user_id]
 
@@ -191,7 +198,13 @@ def get_settings_menu(user_id: int) -> InlineKeyboardMarkup:
     """Меню настроек"""
     settings = get_user_settings(user_id)
 
-    prompt_status = "Кастомный" if settings['use_custom_prompt'] else "Стандартный"
+    # Определяем название текущего промпта
+    if settings['use_custom_prompt']:
+        prompt_status = "Свой промпт"
+    else:
+        prompt_id = settings.get('selected_prompt_id', DEFAULT_PROMPT_ID)
+        prompt_status = PROMPTS.get(prompt_id, {}).get('name', 'Укоротить брюки')
+
     aspect_ratio = settings.get('aspect_ratio', '1:1')
 
     keyboard = [
@@ -238,16 +251,29 @@ def get_prompt_menu(user_id: int) -> InlineKeyboardMarkup:
     """Меню выбора типа промпта"""
     settings = get_user_settings(user_id)
     has_custom = settings['custom_prompt'] is not None
+    current_prompt_id = settings.get('selected_prompt_id', DEFAULT_PROMPT_ID)
+    use_custom = settings['use_custom_prompt']
 
-    keyboard = [
-        [InlineKeyboardButton(text="📝 Стандартный промпт", callback_data="prompt_default")],
-    ]
+    keyboard = []
 
+    # 4 готовых промпта
+    for prompt_id, prompt_data in PROMPTS.items():
+        # Отмечаем текущий выбранный промпт галочкой
+        if not use_custom and current_prompt_id == prompt_id:
+            text = f"✅ {prompt_data['name']}"
+        else:
+            text = prompt_data['name']
+        keyboard.append([InlineKeyboardButton(text=text, callback_data=f"prompt_{prompt_id}")])
+
+    # Кастомный промпт
     if has_custom:
-        keyboard.append([InlineKeyboardButton(text="✏️ Использовать свой промпт", callback_data="prompt_custom")])
-        keyboard.append([InlineKeyboardButton(text="🔄 Изменить свой промпт", callback_data="prompt_new")])
+        if use_custom:
+            keyboard.append([InlineKeyboardButton(text="✅ Свой промпт", callback_data="prompt_use_custom")])
+        else:
+            keyboard.append([InlineKeyboardButton(text="Свой промпт", callback_data="prompt_use_custom")])
+        keyboard.append([InlineKeyboardButton(text="✏️ Изменить свой промпт", callback_data="prompt_edit_custom")])
     else:
-        keyboard.append([InlineKeyboardButton(text="➕ Добавить свой промпт", callback_data="prompt_new")])
+        keyboard.append([InlineKeyboardButton(text="➕ Добавить свой промпт", callback_data="prompt_edit_custom")])
 
     keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="settings")])
 
@@ -453,25 +479,29 @@ async def change_prompt_mode(callback: types.CallbackQuery):
     )
     await callback.answer()
 
-@dp.callback_query(lambda c: c.data == "prompt_default")
-async def set_default_prompt(callback: types.CallbackQuery):
-    """Установить стандартный промпт"""
+@dp.callback_query(lambda c: c.data.startswith("prompt_") and c.data.replace("prompt_", "") in PROMPTS)
+async def set_preset_prompt(callback: types.CallbackQuery):
+    """Установить один из готовых промптов"""
     user_id = callback.from_user.id
     if not await check_auth(user_id):
         await callback.answer("🚫 Доступ запрещен", show_alert=True)
         return
 
+    prompt_id = callback.data.replace("prompt_", "")
+    prompt_name = PROMPTS[prompt_id]['name']
+
     settings = get_user_settings(user_id)
     settings['use_custom_prompt'] = False
+    settings['selected_prompt_id'] = prompt_id
     save_settings(user_id)
 
     await callback.message.edit_text(
-        "✅ Установлен стандартный промпт",
+        f"✅ Установлен промпт: {prompt_name}",
         reply_markup=get_settings_menu(user_id)
     )
     await callback.answer()
 
-@dp.callback_query(lambda c: c.data == "prompt_custom")
+@dp.callback_query(lambda c: c.data == "prompt_use_custom")
 async def set_custom_prompt(callback: types.CallbackQuery):
     """Использовать кастомный промпт"""
     user_id = callback.from_user.id
@@ -489,12 +519,12 @@ async def set_custom_prompt(callback: types.CallbackQuery):
     save_settings(user_id)
 
     await callback.message.edit_text(
-        "✅ Установлен ваш кастомный промпт",
+        "✅ Установлен ваш промпт",
         reply_markup=get_settings_menu(user_id)
     )
     await callback.answer()
 
-@dp.callback_query(lambda c: c.data == "prompt_new")
+@dp.callback_query(lambda c: c.data == "prompt_edit_custom")
 async def request_new_prompt(callback: types.CallbackQuery, state: FSMContext):
     """Запросить новый промпт"""
     if not await check_auth(callback.from_user.id):
@@ -504,7 +534,7 @@ async def request_new_prompt(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer(
         "Отправь свой промпт для обработки изображений.\n\n"
         "Промпт должен описывать, как нужно обработать изображение.\n"
-        "Например: 'Создай реалистичное фото с мягким освещением и белым фоном'\n\n"
+        "Например: 'Осветлить фон и убрать лишние детали'\n\n"
         "Для отмены отправь /cancel"
     )
     await state.set_state(UserStates.waiting_for_custom_prompt)
@@ -542,7 +572,6 @@ async def save_custom_prompt(message: types.Message, state: FSMContext):
 @dp.message(lambda m: m.photo or (m.document and m.document.mime_type and m.document.mime_type.startswith('image/')))
 async def handle_any_photo(message: types.Message, state: FSMContext):
     """Обработка любого фото сразу при отправке"""
-    global queue_count
     user_id = message.from_user.id
 
     # Проверяем авторизацию
@@ -559,18 +588,24 @@ async def handle_any_photo(message: types.Message, state: FSMContext):
     else:
         file_id = message.document.file_id
 
-    # Проверяем очередь
-    if processing_semaphore.locked():
-        queue_count += 1
-        queue_pos = queue_count
-        processing_msg = await message.answer(f"⏳ Сервер занят. Вы {queue_pos}-й в очереди, подождите...")
-    else:
-        processing_msg = await message.answer("⏳ Обрабатываю фото...")
+    # Проверяем очередь и добавляем в неё
+    processing_msg = None
+    my_queue_id = id(message)  # Уникальный ID для этого запроса
+
+    async with queue_lock:
+        if processing_semaphore.locked():
+            queue_list.append(my_queue_id)
+            queue_pos = len(queue_list)
+            processing_msg = await message.answer(f"⏳ Сервер занят. Вы {queue_pos}-й в очереди, подождите...")
+        else:
+            processing_msg = await message.answer("⏳ Обрабатываю фото...")
 
     # Ждем своей очереди
     async with processing_semaphore:
-        if queue_count > 0:
-            queue_count -= 1
+        # Убираем себя из очереди
+        async with queue_lock:
+            if my_queue_id in queue_list:
+                queue_list.remove(my_queue_id)
 
         try:
             await processing_msg.edit_text("⏳ Скачиваю фото...")
@@ -584,9 +619,11 @@ async def handle_any_photo(message: types.Message, state: FSMContext):
             aspect_ratio = settings.get('aspect_ratio', '1:1')
 
             # Определяем какой промпт использовать
-            custom_prompt = None
             if settings['use_custom_prompt'] and settings['custom_prompt']:
-                custom_prompt = settings['custom_prompt']
+                prompt_text = settings['custom_prompt']
+            else:
+                prompt_id = settings.get('selected_prompt_id', DEFAULT_PROMPT_ID)
+                prompt_text = PROMPTS.get(prompt_id, PROMPTS[DEFAULT_PROMPT_ID])['text']
 
             await processing_msg.edit_text(
                 f"⏳ Генерирую {variants_count} вариантов ({aspect_ratio})...\n"
@@ -595,7 +632,7 @@ async def handle_any_photo(message: types.Message, state: FSMContext):
 
             # Обрабатываем и отправляем по мере готовности
             sent_count = 0
-            async for idx, img_bytes in process_image_stream(file_bytes, variants_count, custom_prompt, aspect_ratio):
+            async for idx, img_bytes in process_image_stream(file_bytes, variants_count, prompt_text, aspect_ratio):
                 sent_count += 1
 
                 # Создаем сжатое превью (макс 1280px, JPEG качество 85)
