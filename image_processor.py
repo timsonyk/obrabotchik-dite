@@ -155,10 +155,16 @@ async def process_image_stream(image_bytes: io.BytesIO, variants_count: int = 5,
                 )
                 tasks[task] = i + 1
 
-            # Отдаем результаты по мере готовности
+            # Отдаем результаты по мере готовности (таймаут 5 минут на вариант)
             pending = set(tasks.keys())
             while pending:
-                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                done, pending = await asyncio.wait(pending, timeout=300, return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    # Таймаут - отменяем оставшиеся задачи
+                    logger.warning(f"Таймаут генерации, отменяем {len(pending)} задач")
+                    for task in pending:
+                        task.cancel()
+                    break
                 for task in done:
                     idx = tasks[task]
                     try:
