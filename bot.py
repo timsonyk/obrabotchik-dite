@@ -656,15 +656,24 @@ async def handle_any_photo(message: types.Message, state: FSMContext):
 
             if sent_count == 0:
                 await processing_msg.edit_text(
-                    "❌ Ошибка при обработке изображения. Попробуйте еще раз.",
+                    "❌ Не удалось сгенерировать изображения.\n\n"
+                    "⚠️ Возможно, сервер Gemini перегружен.\n"
+                    "Попробуйте ещё раз через пару минут.",
                     reply_markup=get_main_menu()
                 )
                 return
 
-            await processing_msg.edit_text(
-                f"✅ Готово! Отправлено {sent_count} вариантов.",
-                reply_markup=get_main_menu()
-            )
+            if sent_count < variants_count:
+                await processing_msg.edit_text(
+                    f"⚠️ Готово! Отправлено {sent_count} из {variants_count} вариантов.\n"
+                    "Часть запросов не удалась (сервер перегружен).",
+                    reply_markup=get_main_menu()
+                )
+            else:
+                await processing_msg.edit_text(
+                    f"✅ Готово! Отправлено {sent_count} вариантов.",
+                    reply_markup=get_main_menu()
+                )
 
         except Exception as e:
             logger.error(f"Ошибка при обработке фото: {e}")
